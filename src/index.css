@@ -1,0 +1,173 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+@keyframes ring {
+  0% { transform: rotate(0); }
+  10% { transform: rotate(15deg); }
+  20% { transform: rotate(-15deg); }
+  30% { transform: rotate(10deg); }
+  40% { transform: rotate(-10deg); }
+  50% { transform: rotate(0); }
+  100% { transform: rotate(0); }
+}
+.animate-ring {
+  animation: ring 2s infinite;
+}
+
+/* Force l'affichage de la scrollbar pour indiquer qu'il y a du contenu caché */
+.custom-scrollbar {
+  scrollbar-gutter: stable;
+}
+
+/* Style pour Firefox (qui n'utilise pas -webkit) */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #175a95 #f5f5f5;
+}
+
+.dark * {
+  scrollbar-color: #175a95 #1f2937;
+}
+
+@layer base {
+  body {
+    @apply font-sans antialiased bg-[#F8F9FA] text-slate-900;
+  }
+
+  .dark body {
+    @apply bg-slate-950 text-slate-100;
+  }
+
+  /* Simple dark-mode overrides for common utility classes used throughout the UI */
+  .dark .bg-white { background-color: #0f172a !important; }
+  .dark .bg-slate-50 { background-color: #0b1220 !important; }
+  .dark .bg-slate-100 { background-color: #111827 !important; }
+  .dark .bg-slate-200 { background-color: #1f2937 !important; }
+  .dark .text-slate-900 { color: #f1f5f9 !important; }
+  .dark .text-slate-800 { color: #e2e8f0 !important; }
+  .dark .text-slate-700 { color: #cbd5e1 !important; }
+  .dark .text-slate-600 { color: #94a3b8 !important; }
+  .dark .text-slate-500 { color: #94a3b8 !important; }
+  .dark .border-slate-200 { border-color: #334155 !important; }
+  .dark .border-slate-100 { border-color: #1f2937 !important; }
+  .dark .border-white\/10 { border-color: rgba(255,255,255,0.1) !important; }
+
+  /* Make form controls readable in light and dark modes */
+  select,
+  option {
+    color: #0f172a !important;
+    background-color: #ffffff !important;
+  }
+
+  /* Ensure selected option is readable when highlighted by browser UI */
+  select option:checked {
+    color: #f8fafc !important;
+    background-color: #1d4ed8 !important;
+  }
+
+  /* Utility class for inputs/fields that should always stay readable on light bg */
+  .form-control {
+    color: #0f172a !important;
+    background-color: #ffffff !important;
+    caret-color: currentColor !important;
+  }
+  .dark .form-control {
+    color: #e2e8f0 !important;
+    background-color: #0b1220 !important;
+    caret-color: currentColor !important;
+  }
+
+  .dark input,
+  .dark textarea,
+  .dark select,
+  .dark button,
+  .dark option {
+    /* inherit from body/text color so individual components can override */
+    color: inherit;
+  }
+
+  .dark select,
+  .dark option {
+    background-color: #0b1220 !important;
+  }
+
+  /* Ensure white text in light mode doesn't disappear on light backgrounds inside specific modals */
+  .light-mode .text-white {
+    color: #0f172a !important;
+  }
+}
+
+/* SCROLLBARS STYLISÉES - Visibles et faciles à manipuler */
+@layer utilities {
+  /* Scrollbar personnalisée pour tous les éléments */
+  ::-webkit-scrollbar {
+    width: 14px;
+    height: 14px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: #f5f5f5;
+    border-radius: 10px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, #175a95 0%, #149308 100%);
+    border-radius: 10px;
+    border: 2px solid #f5f5f5;
+    min-height: 40px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(180deg, #149308 0%, #175a95 100%);
+    border: 2px solid #e8f0f8;
+  }
+
+  ::-webkit-scrollbar-thumb:active {
+    background: #0f4620;
+  }
+
+  /* Scrollbar spécifique personnalisée */
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 14px;
+    height: 14px;
+  }
+  
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: #f5f5f5;
+    border-radius: 10px;
+  }
+  
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, #175a95 0%, #149308 100%);
+    border-radius: 10px;
+    border: 2px solid #f5f5f5;
+    min-height: 40px;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(180deg, #149308 0%, #175a95 100%);
+    border: 2px solid #e8f0f8;
+  }
+
+  /* Dark mode scrollbar */
+  .dark ::-webkit-scrollbar-track {
+    background: #1f2937;
+  }
+
+  .dark ::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, #175a95 0%, #149308 100%);
+    border: 2px solid #1f2937;
+  }
+
+  .dark .custom-scrollbar::-webkit-scrollbar-track {
+    background: #1f2937;
+  }
+
+  .dark .custom-scrollbar::-webkit-scrollbar-thumb {
+    border: 2px solid #1f2937;
+  }
+}
