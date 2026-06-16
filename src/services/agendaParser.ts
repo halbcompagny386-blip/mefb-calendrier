@@ -303,9 +303,9 @@ export const structuredAgendaWithAI = async (rawText: string): Promise<Partial<E
       console.error(`  ❌ Erreur sur le bloc ${i + 1} :`, err);
       // On continue avec les autres blocs même en cas d'erreur
     }
-    // Pause courte pour éviter le rate-limit Groq (429)
+    // Pause entre les appels pour respecter le rate-limit Groq (évite l'erreur 429)
     if (i < finalChunks.length - 1) {
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise(r => setTimeout(r, 2000));
     }
   }
 

@@ -27,32 +27,53 @@ export const AgendaUploader = ({ onImportComplete }: Props) => {
       }
 
       // 1. On prépare les données pour Supabase
-      const finalized = newActivities.map((act: any, index: number) => ({
-        ...act,
-        date: act.date || act.Date || act["Date"] || today,
-        title: act.title || act.Activités || "Activité sans titre",
-        description: act.description || act["Points de discussion"] || act.description || "Détails non disponibles",
-        responsible: act.responsible || act.Responsable || "-",
-        participants: act.participants || act.Participants || "Non spécifiés",
-        location: act.location || act.Lieu || "À préciser",
-        media: act.media || act["Couverture médiatique"] || act["Couverture médiatique "] || "N",
-        interview_questions: JSON.stringify(act.interview_questions || []), // ✅ Sérialiser en JSON string
-        
-        // --- AJOUTS CRUCIAUX POUR LE DASHBOARD ---
-        created_at: new Date().toISOString(), // Pour que le tri fonctionne
-        status: "À venir",
-        workflow: "Brouillon",
-        commContent: "",
-        channels: JSON.stringify([]), // ✅ Sérialiser en JSON string
-        comments: JSON.stringify([]), // ✅ Sérialiser en JSON string
-        history: JSON.stringify([{
-          id: `h-import-${Date.now()}-${index}`,
-          timestamp: new Date().toISOString(),
-          user: "Système",
-          action: "Importation",
-          details: "Importé via Groq AI"
-        }]) // ✅ Sérialiser en JSON string
-      }));
+      // ✅ CORRECTION : On sélectionne EXPLICITEMENT les colonnes Supabase valides.
+      // Le spread ...act injectait des champs inconnus comme "dayOfWeek" → erreur 400.
+      const finalized = newActivities.map((act: any, index: number) => {
+        const baseDate = act.date || act.Date || act["Date"] || today;
+
+        // Sélection stricte des colonnes qui existent dans la table Supabase `activities`
+        const record: Record<string, any> = {
+          // ── Champs extraits par Groq ──
+          date:               baseDate,
+          time:               act.time || "",
+          title:              act.title || act.Activités || "Activité sans titre",
+          description:        act.description || act["Points de discussion"] || "Détails non disponibles",
+          responsible:        act.responsible || act.Responsable || "-",
+          participants:       act.participants || act.Participants || "Non spécifiés",
+          location:           act.location || act.Lieu || "À préciser",
+          media:              act.media || act["Couverture médiatique"] || act["Couverture médiatique "] || "N",
+          suggestedModel:     act.suggestedModel || "Facebook",
+          interview_questions: JSON.stringify(act.interview_questions || []),
+
+          // ── Champs de workflow (valeurs par défaut à l'import) ──
+          created_at:   new Date().toISOString(),
+          status:       "À venir",
+          workflow:     "Brouillon",
+          commContent:  "",
+          channels:     JSON.stringify([]),
+          comments:     JSON.stringify([]),
+          history:      JSON.stringify([{
+            id:        `h-import-${Date.now()}-${index}`,
+            timestamp: new Date().toISOString(),
+            user:      "Système",
+            action:    "Importation",
+            details:   "Importé via Groq AI"
+          }]),
+
+          // ── Champs optionnels (si présents dans la réponse Groq) ──
+          ...(act.category          ? { category: act.category }                 : {}),
+          ...(act.type              ? { type: act.type }                         : {}),
+          ...(act.priority          ? { priority: act.priority }                 : {}),
+          ...(act.aiSummary         ? { aiSummary: act.aiSummary }               : {}),
+          ...(act.discussion_points ? { discussion_points: act.discussion_points } : {}),
+        };
+
+        // ❌ On N'inclut PAS : dayOfWeek, suggestedModel (si absent), ni aucun autre
+        //    champ inventé par l'IA qui n'existe pas en base Supabase.
+
+        return record;
+      });
 
       // 2. ENREGISTREMENT RÉEL DANS SUPABASE
       const { data, error } = await supabase
