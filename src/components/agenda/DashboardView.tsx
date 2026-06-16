@@ -59,6 +59,7 @@ export const DashboardView = ({
 
   // --- État pour l'animation du compteur qui vient de s'incrémenter ---
   const [animatedIndex, setAnimatedIndex] = useState<number | null>(null);
+  const [showFullWeek, setShowFullWeek] = useState(true); // ✅ Semaine complète par défaut
   const previousStatsRef = React.useRef({ total: 0, confirmed: 0, pending: 0, published: 0 });
 
   // --- Normaliser le rôle pour les contrôles d'accès ---
@@ -139,25 +140,27 @@ export const DashboardView = ({
       return { total: 0, confirmed: 0, pending: pendingCount || 0, published: pubCount || 0 };
     }
 
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
+    // ✅ CORRECTION #3 : Compter les activités du MOIS courant basé sur `date` (pas created_at)
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const currentMonth = now.getMonth(); // 0-indexed
 
-    // On ne garde que ce qui a été créé AUJOURD'HUI
-    const todaysActivities = activities.filter(a => {
-      if (!a.created_at) return false;
-      return new Date(a.created_at) >= todayStart;
+    const monthActivities = activities.filter(a => {
+      if (!a.date) return false;
+      const actDate = new Date(a.date + 'T00:00:00'); // Forcer heure locale
+      return actDate.getFullYear() === currentYear && actDate.getMonth() === currentMonth;
     });
 
-    const confirmedCount = todaysActivities.filter(a =>
+    const confirmedCount = monthActivities.filter(a =>
       a.workflow === 'Validé' || a.status === 'Confirmé' || (a as any).validation_status === 'Validé'
     ).length;
 
-    const pendingAgendaCount = todaysActivities.filter(a =>
+    const pendingAgendaCount = monthActivities.filter(a =>
       a.workflow === 'Soumis' || (a as any).validation_status === 'Soumis'
     ).length;
 
     return {
-      total: todaysActivities.length,
+      total: monthActivities.length,
       confirmed: confirmedCount + (approvedPressCount || 0),
       pending: (pendingCount || 0) + pendingAgendaCount,
       published: pubCount || 0
@@ -185,7 +188,7 @@ export const DashboardView = ({
   }, [stats]);
 
   const statCards = [
-    { label: "Total Activités", value: stats.total, icon: Calendar, bg: "bg-blue-50 dark:bg-blue-900/20", color: "text-[#175a95]" },
+    { label: `Total Activités — ${new Date().toLocaleDateString('fr-FR', { month: 'long' })}`, value: stats.total, icon: Calendar, bg: "bg-blue-50 dark:bg-blue-900/20", color: "text-[#175a95]" },
     { label: "Confirmées", value: stats.confirmed, icon: CheckCircle, bg: "bg-emerald-50 dark:bg-emerald-900/20", color: "text-[#149308]" },
     { label: "En Validation", value: stats.pending, icon: Clock, bg: "bg-amber-50 dark:bg-amber-900/20", color: "text-amber-500" },
     { label: "Publiées", value: stats.published, icon: Send, bg: "bg-indigo-50 dark:bg-indigo-900/20", color: "text-indigo-600" }
@@ -326,14 +329,47 @@ export const DashboardView = ({
     }
   };
 
-  const recentActivities = [...activities]
-    .filter(a => a.title)
-    .sort((a, b) => {
-      const dateA = a.created_at ? new Date(a.created_at).getTime() : 0;
-      const dateB = b.created_at ? new Date(b.created_at).getTime() : 0;
-      return dateB - dateA;
-    })
-    .slice(0, 8);
+  const recentActivities = React.useMemo(() => {
+    const today = new Date();
+    const todayString = today.toISOString().split('T')[0]; // Format YYYY-MM-DD
+
+    // ✅ CORRECTION #2 : Semaine courante (lundi → vendredi) — calcul robuste
+    const currentDay = today.getDay();
+    const mondayOffset = currentDay === 0 ? -6 : 1 - currentDay;
+    const monday = new Date(today);
+    monday.setDate(monday.getDate() + mondayOffset);
+    monday.setHours(0, 0, 0, 0);
+    const friday = new Date(monday);
+    friday.setDate(friday.getDate() + 4);
+    friday.setHours(23, 59, 59, 999);
+
+    const mondayString = monday.toISOString().split('T')[0];
+    const fridayString = friday.toISOString().split('T')[0];
+
+    const filtered = [...activities]
+      .filter(a => {
+        if (!a.title) return false;
+        if (!showFullWeek) {
+          // Mode "Aujourd'hui" : uniquement le jour actuel
+          return a.date === todayString;
+        }
+        // ✅ CORRECTION #2 : Mode semaine — affiche lundi → vendredi
+        return a.date >= mondayString && a.date <= fridayString;
+      })
+      .sort((a, b) => {
+        // Trier par date d'activité croissante (plus tôt en premier)
+        const dateA = a.date ? new Date(a.date + 'T00:00:00').getTime() : 0;
+        const dateB = b.date ? new Date(b.date + 'T00:00:00').getTime() : 0;
+        if (dateA !== dateB) return dateA - dateB;
+        // Si même date, trier par heure
+        const timeA = a.time ? a.time.split('-')[0].replace(/[^\d:]/g, '').replace(/h/g, ':') : '00:00';
+        const timeB = b.time ? b.time.split('-')[0].replace(/[^\d:]/g, '').replace(/h/g, ':') : '00:00';
+        return timeA.localeCompare(timeB);
+      });
+
+    // ✅ CORRECTION #4 : Pas de limite en mode semaine, limite 10 en mode jour
+    return showFullWeek ? filtered : filtered.slice(0, 10);
+  }, [activities, showFullWeek]);
 
   return (
     <div className="space-y-8 animate-in fade-in duration-700 pb-20">
@@ -372,7 +408,9 @@ export const DashboardView = ({
           <div className="bg-white dark:bg-[#161e2d] rounded-[2rem] border border-slate-100 shadow-sm overflow-hidden">
               <div className="p-6 border-b border-slate-50 flex flex-col sm:flex-row gap-3 sm:gap-0 justify-between items-start sm:items-center">
                 <div>
-                  <h3 className="text-xs font-black text-[#175a95] uppercase tracking-widest">Dernières activités du Cabinet</h3>
+                  <h3 className="text-xs font-black text-[#175a95] uppercase tracking-widest">
+                    {showFullWeek ? `Activités de la semaine (${recentActivities.length})` : `Activités du jour (${recentActivities.length})`}
+                  </h3>
                 </div>
                 <div className="flex flex-wrap gap-2 items-center">
                   {(isCabinet || isAdmin) && onOpenAddAgendaActivities && (
@@ -383,8 +421,18 @@ export const DashboardView = ({
                       Ajouter une activité
                     </button>
                   )}
-                  <button onClick={onViewArchiveCabinet} className="px-4 py-2 bg-slate-100 text-slate-700 rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-slate-200 transition-all flex items-center gap-1">
-                    Voir tout <ArrowRight size={12} />
+                  <button 
+                    onClick={() => setShowFullWeek(!showFullWeek)} 
+                    className={`px-4 py-2 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1 ${
+                      showFullWeek 
+                        ? 'bg-[#175a95] text-white hover:bg-blue-800' 
+                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                    }`}
+                  >
+                    {showFullWeek ? "Aujourd'hui" : 'Semaine'} <ArrowRight size={12} />
+                  </button>
+                  <button onClick={onViewArchiveCabinet} className="px-4 py-2 bg-indigo-100 text-indigo-700 rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-200 transition-all flex items-center gap-1" title="Accéder à l'archive complète">
+                    Archives <ArrowRight size={12} />
                   </button>
                 </div>
               </div>
@@ -398,7 +446,12 @@ export const DashboardView = ({
                     className="p-4 sm:p-5 flex flex-col sm:flex-row justify-between items-start sm:items-center group hover:bg-slate-50 cursor-pointer transition-all dark:hover:bg-slate-50 gap-3 sm:gap-0"
                   >
                     <div className="min-w-0 flex-1 w-full sm:w-auto">
-                      <p className="text-[10px] font-bold text-[#175a95] dark:text-blue-400 group-hover:text-[#175a95] uppercase mb-1">{a.date}</p>
+                      <div className="flex items-center gap-2 mb-1">
+                        <p className="text-[10px] font-bold text-[#175a95] dark:text-blue-400 group-hover:text-[#175a95] uppercase">
+                          {a.date}
+                        </p>
+                        {a.time && <p className="text-[10px] font-semibold text-slate-500 dark:text-slate-400">• {a.time}</p>}
+                      </div>
                       <h4 className="font-black text-slate-800 dark:text-slate-200 group-hover:text-slate-800 text-sm truncate uppercase tracking-tight">{a.title}</h4>
                       <p className="text-xs text-slate-500 dark:text-slate-400 group-hover:text-slate-500 truncate italic mt-1">{a.description || '...'}</p>
                     </div>
