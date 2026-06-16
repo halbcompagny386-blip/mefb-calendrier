@@ -60,7 +60,7 @@ export const parseAgendaFile = async (file: File): Promise<string> => {
     for (let i = 1; i <= pdf.numPages; i++) {
       const page = await pdf.getPage(i);
       const textContent = await page.getTextContent();
-      // Reconstruction fidèle : on préserve les sauts de ligne via les positions Y
+      // Reconstruction fidèle avec préservation des sauts de ligne
       const items = textContent.items as any[];
       let lastY: number | null = null;
       let lineText = '';
@@ -109,217 +109,200 @@ const calculateWeekdayDate = (dayName: string, referenceDate: Date = new Date())
 };
 
 // ─────────────────────────────────────────────
-// DÉCOUPAGE DU TEXTE PAR BLOC/JOUR
+// EXTRACTION DU JSON DEPUIS LA RÉPONSE GROQ
 // ─────────────────────────────────────────────
 
-/**
- * Découpe le texte brut en sections par jour de la semaine.
- * Si aucun jour n'est détecté, retourne le texte entier en un seul bloc.
- */
-const splitTextByDay = (text: string): string[] => {
-  // Regex pour détecter les entêtes de jours (ex: "Lundi", "MARDI", "Mercredi 17 juin", etc.)
-  const dayPattern = /(?:^|\n)((?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)[^\n]*)/gi;
-  const matches = [...text.matchAll(dayPattern)];
+const extractJsonFromResponse = (text: string): any[] | null => {
+  // Tente d'extraire un tableau JSON (supporte les blocs markdown ```json...```)
+  const patterns = [
+    /```json\s*([\s\S]*?)```/i,
+    /```\s*([\s\S]*?)```/i,
+    /(\[[\s\S]*\])/,
+  ];
 
-  if (matches.length < 2) {
-    // Pas assez de jours détectés → on envoie tout en un seul bloc
-    return [text];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) {
+      try {
+        const parsed = JSON.parse(match[1] || match[0]);
+        if (Array.isArray(parsed)) return parsed;
+      } catch {
+        // continuer avec le pattern suivant
+      }
+    }
   }
-
-  const chunks: string[] = [];
-  for (let i = 0; i < matches.length; i++) {
-    const start = matches[i].index! + (matches[i][0].startsWith('\n') ? 1 : 0);
-    const end = i + 1 < matches.length ? matches[i + 1].index! : text.length;
-    const chunk = text.slice(start, end).trim();
-    if (chunk.length > 50) chunks.push(chunk); // Ignorer les blocs vides
-  }
-
-  return chunks.length > 0 ? chunks : [text];
+  return null;
 };
 
 // ─────────────────────────────────────────────
-// APPEL GROQ AVEC RETRY
+// APPEL GROQ UNIQUE AVEC BACKOFF EXPONENTIEL
+// Stratégie : 1 seul appel pour tout l'agenda.
+// En cas de 429 (rate limit), on attend et on réessaie.
 // ─────────────────────────────────────────────
 
-const MAX_CHUNK_CHARS = 4000; // Limite de sécurité par appel Groq
+// Délais d'attente progressifs en cas de 429 : 15s, 30s, 60s
+const RETRY_DELAYS_MS = [15000, 30000, 60000];
 
-const callGroqForChunk = async (
-  chunkText: string,
+const callGroqWithBackoff = async (
+  fullText: string,
   apiKey: string,
-  today: string,
-  attempt = 1
+  today: string
 ): Promise<any[]> => {
   const url = "https://api.groq.com/openai/v1/chat/completions";
 
   const prompt = `
-    Tu es un assistant expert en extraction d'agendas institutionnels du MEFB (Ministère de l'Économie et des Finances).
-    Analyse le texte suivant et extrais ABSOLUMENT TOUTES les activités présentes dans ce bloc.
+Tu es un assistant expert en extraction d'agendas institutionnels du MEFB (Ministère de l'Économie et des Finances de Guinée).
+Analyse INTÉGRALEMENT le texte suivant et extrais ABSOLUMENT TOUTES les activités de TOUS les jours (Lundi à Vendredi).
 
-    TEXTE À ANALYSER :
-    """
-    ${chunkText}
-    """
+TEXTE COMPLET DE L'AGENDA :
+"""
+${fullText}
+"""
 
-    DIRECTIVES CRITIQUES :
-    1. Extrais TOUTES les activités, même les plus courtes. Ne supprime aucune.
-    2. Pour chaque activité identifiée, inclus le jour de la semaine dans ta réponse.
-    3. Identifie l'heure ou la plage horaire (ex: 10h00-10h15) pour chaque activité.
-    4. Résous les abréviations : SG → Secrétaire Général, CC → Cheffe de Cabinet, DGIP/DNIP → Investissements Publics, PRG → Présidence, DGB → Budget.
-    5. Si une ligne n'a pas de titre clair, utilise le début de la description comme titre.
-    6. DATE : Utilise le format YYYY-MM-DD si une date est présente dans le texte, sinon laisse vide.
-    7. JOUR_SEMAINE : Inclus le jour exact (lundi, mardi, mercredi, jeudi, vendredi) pour chaque activité.
-    8. MEDIA : "O" si couverture médiatique mentionnée, sinon "N".
+RÈGLES STRICTES :
+1. Extrais TOUTES les activités sans exception, même les plus courtes.
+2. Détecte CHAQUE jour de la semaine (Lundi, Mardi, Mercredi, Jeudi, Vendredi).
+3. Associe chaque activité à son jour et sa date correcte.
+4. Identifie l'heure ou la plage horaire (ex: 10h00 - 11h00).
+5. Résous les abréviations : SG → Secrétaire Général, CC → Cheffe de Cabinet, DGB → Direction Générale du Budget, PRG → Présidence, DGIP → Investissements Publics.
+6. MEDIA : "O" si couverture médiatique mentionnée, sinon "N".
+7. DATE : Format YYYY-MM-DD si une date explicite existe dans le texte, sinon laisser vide (le système calculera automatiquement).
 
-    FORMAT DE RÉPONSE ATTENDU (TABLEAU JSON UNIQUEMENT) :
-    [
-      {
-        "title": "Nom de l'activité",
-        "dayOfWeek": "lundi|mardi|mercredi|jeudi|vendredi",
-        "date": "YYYY-MM-DD ou laisser vide si inconnu",
-        "time": "Plage horaire (ex: 09h00 - 09h30)",
-        "description": "Points de discussion détaillés",
-        "responsible": "Responsable principal",
-        "participants": "Liste complète des participants",
-        "location": "Lieu précis",
-        "media": "O ou N",
-        "suggestedModel": "Facebook",
-        "interview_questions": []
-      }
-    ]
+RÉPONSE ATTENDUE : Uniquement un tableau JSON valide, sans texte avant ni après.
 
-    ⚠️ OBLIGATION : Retourne UNIQUEMENT le tableau JSON, sans aucun texte avant ou après.
-  `;
+[
+  {
+    "title": "Titre de l'activité",
+    "dayOfWeek": "lundi|mardi|mercredi|jeudi|vendredi",
+    "date": "YYYY-MM-DD ou vide",
+    "time": "09h00 - 10h00",
+    "description": "Description détaillée",
+    "responsible": "Responsable",
+    "participants": "Liste des participants",
+    "location": "Lieu",
+    "media": "O ou N",
+    "suggestedModel": "Facebook",
+    "interview_questions": []
+  }
+]
+`;
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      model: "llama-3.3-70b-versatile",
-      messages: [
-        {
-          role: "system",
-          content: "Tu es un extracteur de données JSON. Tu réponds UNIQUEMENT par un tableau JSON valide. Aucun texte avant ou après. Tu dois extraire ABSOLUMENT TOUTES les activités présentes dans le texte."
+  let lastError: any = null;
+
+  // Tentative initiale + jusqu'à 3 retries avec backoff exponentiel
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    if (attempt > 0) {
+      const waitMs = RETRY_DELAYS_MS[attempt - 1];
+      console.warn(`⏳ Rate limit Groq (429) — Attente de ${waitMs / 1000}s avant la tentative ${attempt + 1}...`);
+      await new Promise(r => setTimeout(r, waitMs));
+    }
+
+    try {
+      console.log(`🚀 Appel Groq — tentative ${attempt + 1}/${RETRY_DELAYS_MS.length + 1}...`);
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json'
         },
-        { role: "user", content: prompt }
-      ],
-      temperature: 0.05,
-      max_tokens: 4096  // ✅ Garantit que la réponse n'est pas tronquée
-    })
-  });
+        body: JSON.stringify({
+          model: "llama-3.3-70b-versatile",
+          messages: [
+            {
+              role: "system",
+              content: "Tu es un extracteur de données JSON strict. Tu réponds UNIQUEMENT par un tableau JSON valide. Zéro texte avant ou après les crochets. Tu dois extraire ABSOLUMENT TOUTES les activités présentes dans le texte fourni."
+            },
+            { role: "user", content: prompt }
+          ],
+          temperature: 0.05,
+          max_tokens: 8192  // Large pour capturer toutes les activités d'une semaine complète
+        })
+      });
 
-  if (!response.ok) {
-    throw new Error(`Groq API error: ${response.status} ${response.statusText}`);
-  }
+      // 429 = Rate limit → on retry avec backoff
+      if (response.status === 429) {
+        // Lire le header Retry-After si disponible
+        const retryAfter = response.headers.get('Retry-After');
+        if (retryAfter) {
+          const waitSec = parseInt(retryAfter, 10);
+          if (!isNaN(waitSec) && waitSec > 0) {
+            console.warn(`⏳ Groq demande d'attendre ${waitSec}s (Retry-After header)...`);
+            await new Promise(r => setTimeout(r, waitSec * 1000 + 1000));
+            attempt--; // Ne pas compter comme un retry de notre part
+            continue;
+          }
+        }
+        lastError = new Error('429 Too Many Requests');
+        continue; // → next retry avec le délai défini
+      }
 
-  const data = await response.json();
-  let textResponse = data.choices?.[0]?.message?.content?.trim() || '';
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw new Error(`Groq API error ${response.status}: ${errorBody}`);
+      }
 
-  // Extraction robuste du JSON (supporte markdown code blocks)
-  const jsonMatch = textResponse.match(/```(?:json)?\s*([\s\S]*?)```/) ||
-    textResponse.match(/(\[[\s\S]*\])/);
+      const data = await response.json();
+      const textResponse = data.choices?.[0]?.message?.content?.trim() || '';
 
-  if (!jsonMatch) {
-    if (attempt < 3) {
-      console.warn(`⚠️ Tentative ${attempt} : pas de JSON détecté, retry...`);
-      await new Promise(r => setTimeout(r, 1000 * attempt));
-      return callGroqForChunk(chunkText, apiKey, today, attempt + 1);
+      console.log(`✅ Réponse Groq reçue (${textResponse.length} caractères)`);
+
+      const activities = extractJsonFromResponse(textResponse);
+
+      if (!activities || activities.length === 0) {
+        console.error("❌ Aucun tableau JSON trouvé dans la réponse Groq.");
+        return [];
+      }
+
+      console.log(`📊 ${activities.length} activité(s) extraite(s) depuis l'agenda.`);
+      return activities;
+
+    } catch (err: any) {
+      lastError = err;
+      // Si ce n'est pas une erreur réseau transitoire, on arrête les retries
+      if (!err.message?.includes('429') && !err.message?.includes('fetch')) {
+        console.error("❌ Erreur non-récupérable Groq :", err);
+        break;
+      }
     }
-    console.error("❌ Aucun tableau JSON trouvé après 3 tentatives pour ce bloc.");
-    return [];
   }
 
-  const jsonStr = jsonMatch[1] || jsonMatch[0];
-
-  try {
-    return JSON.parse(jsonStr);
-  } catch (parseError) {
-    if (attempt < 3) {
-      console.warn(`⚠️ Tentative ${attempt} : JSON malformé, retry...`);
-      await new Promise(r => setTimeout(r, 1000 * attempt));
-      return callGroqForChunk(chunkText, apiKey, today, attempt + 1);
-    }
-    console.error("❌ JSON invalide après 3 tentatives :", parseError);
-    return [];
-  }
+  console.error("❌ Échec après toutes les tentatives Groq :", lastError);
+  return [];
 };
 
 // ─────────────────────────────────────────────
-// FONCTION PRINCIPALE D'ANALYSE AVEC CHUNKING
+// FONCTION PRINCIPALE D'ANALYSE
 // ─────────────────────────────────────────────
 
 /**
- * Analyse le texte via Groq avec chunking par jour pour éviter les pertes liées aux token limits.
- * Si le texte est court, un seul appel est effectué (comportement d'origine).
- * Si le texte est long, il est découpé par jour et chaque bloc est envoyé séparément.
+ * Analyse le texte de l'agenda via un seul appel Groq optimisé.
+ * Gère automatiquement les erreurs 429 avec un backoff exponentiel (15s → 30s → 60s).
  */
 export const structuredAgendaWithAI = async (rawText: string): Promise<Partial<EditorialActivity>[]> => {
   const apiKey = import.meta.env.VITE_GROQ_API_KEY;
   const today = new Date().toISOString().split('T')[0];
 
   if (!apiKey) {
-    console.error("❌ VITE_GROQ_API_KEY non définie.");
+    console.error("❌ VITE_GROQ_API_KEY non définie dans les variables d'environnement.");
     return [];
   }
 
-  // ── Étape 1 : Découper le texte par blocs/jours ──
-  const chunks = splitTextByDay(rawText);
-  console.log(`📋 Agenda découpé en ${chunks.length} bloc(s) pour traitement.`);
+  console.log(`📋 Texte extrait : ${rawText.length} caractères — envoi à Groq en un seul appel optimisé.`);
 
-  // ── Étape 2 : Si un seul bloc long → le redécouper par taille ──
-  const finalChunks: string[] = [];
-  for (const chunk of chunks) {
-    if (chunk.length > MAX_CHUNK_CHARS) {
-      // Découper par paragraphes si un bloc est encore trop long
-      const subChunks: string[] = [];
-      let current = '';
-      for (const line of chunk.split('\n')) {
-        if ((current + line).length > MAX_CHUNK_CHARS && current.length > 0) {
-          subChunks.push(current.trim());
-          current = '';
-        }
-        current += line + '\n';
-      }
-      if (current.trim().length > 0) subChunks.push(current.trim());
-      finalChunks.push(...subChunks);
-    } else {
-      finalChunks.push(chunk);
-    }
-  }
+  // ── Appel unique avec retry automatique ──
+  const rawActivities = await callGroqWithBackoff(rawText, apiKey, today);
 
-  console.log(`🚀 Envoi de ${finalChunks.length} appel(s) Groq en séquentiel...`);
-
-  // ── Étape 3 : Appels Groq séquentiels (évite le rate-limit) ──
-  const allRawActivities: any[] = [];
-  for (let i = 0; i < finalChunks.length; i++) {
-    console.log(`  → Traitement bloc ${i + 1}/${finalChunks.length}...`);
-    try {
-      const results = await callGroqForChunk(finalChunks[i], apiKey, today);
-      console.log(`  ✅ Bloc ${i + 1} : ${results.length} activité(s) extraite(s)`);
-      allRawActivities.push(...results);
-    } catch (err) {
-      console.error(`  ❌ Erreur sur le bloc ${i + 1} :`, err);
-      // On continue avec les autres blocs même en cas d'erreur
-    }
-    // Pause entre les appels pour respecter le rate-limit Groq (évite l'erreur 429)
-    if (i < finalChunks.length - 1) {
-      await new Promise(r => setTimeout(r, 2000));
-    }
-  }
-
-  console.log(`📊 Total brut extrait : ${allRawActivities.length} activité(s)`);
-
-  if (allRawActivities.length === 0) {
+  if (rawActivities.length === 0) {
     return [];
   }
 
-  // ── Étape 4 : Post-traitement — calcul des dates manquantes + déduplification ──
+  // ── Post-traitement : calcul des dates manquantes + déduplification ──
   const seen = new Set<string>();
-  const processedActivities = allRawActivities
+
+  const processedActivities = rawActivities
     .map((activity: any) => {
-      // Calcul de la date si manquante
+      // Calcul automatique de la date si elle est absente ou vide
       if (!activity.date || activity.date.trim() === '') {
         if (activity.dayOfWeek) {
           activity.date = calculateWeekdayDate(activity.dayOfWeek);
@@ -330,14 +313,16 @@ export const structuredAgendaWithAI = async (rawText: string): Promise<Partial<E
       return activity;
     })
     .filter((activity: any) => {
-      // Déduplification par titre + date (évite les doublons entre blocs)
+      // Ignorer les entrées sans titre
+      if (!activity.title || activity.title.trim() === '') return false;
+      // Déduplifier par titre + date
       const key = `${(activity.title || '').toLowerCase().trim()}__${activity.date}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     });
 
-  console.log(`✅ Après déduplification : ${processedActivities.length} activité(s) unique(s)`);
+  console.log(`✅ ${processedActivities.length} activité(s) unique(s) prêtes pour Supabase.`);
 
   return processedActivities;
 };
